@@ -47,36 +47,41 @@ class _CalculPageState extends State<CalculPage> with SingleTickerProviderStateM
     setState(() {});
   }
 
-  int _recognizeDigit() {
-    if (points.isEmpty) return -1;
-    final cleanPoints = points.where((p) => p != Offset.zero).toList();
-    if (cleanPoints.length < 5) return -1;
+int _recognizeDigit() {
+  if (points.isEmpty) return -1;
+  final cleanPoints = _simplify(points, target: 32);
+  if (cleanPoints.length < 5) return -1;
 
-    double minX = cleanPoints.first.dx;
-    double maxX = cleanPoints.first.dx;
-    double minY = cleanPoints.first.dy;
-    double maxY = cleanPoints.first.dy;
+  double minX = cleanPoints.first.dx;
+  double maxX = cleanPoints.first.dx;
+  double minY = cleanPoints.first.dy;
+  double maxY = cleanPoints.first.dy;
 
-    for (final point in cleanPoints) {
-      minX = math.min(minX, point.dx);
-      maxX = math.max(maxX, point.dx);
-      minY = math.min(minY, point.dy);
-      maxY = math.max(maxY, point.dy);
-    }
-
-    double width = maxX - minX;
-    double height = maxY - minY;
-
-    List<Offset> normalizedPoints = [];
-    for (final point in cleanPoints) {
-      normalizedPoints.add(Offset(
-        (point.dx - minX) / (width == 0 ? 1 : width),
-        (point.dy - minY) / (height == 0 ? 1 : height),
-      ));
-    }
-
-    return _recognizePattern(normalizedPoints, width / (height == 0 ? 1 : height));
+  for (final point in cleanPoints) {
+    minX = math.min(minX, point.dx);
+    maxX = math.max(maxX, point.dx);
+    minY = math.min(minY, point.dy);
+    maxY = math.max(maxY, point.dy);
   }
+
+  double width = maxX - minX + 1e-5;
+  double height = maxY - minY + 1e-5;
+
+  List<Offset> normalizedPoints = [];
+  for (final point in cleanPoints) {
+    normalizedPoints.add(Offset(
+      (point.dx - minX) / width,
+      (point.dy - minY) / height,
+    ));
+  }
+
+  // Après avoir normalisé, centre le tracé
+  double avgX = normalizedPoints.map((p) => p.dx).reduce((a, b) => a + b) / normalizedPoints.length;
+  double avgY = normalizedPoints.map((p) => p.dy).reduce((a, b) => a + b) / normalizedPoints.length;
+  normalizedPoints = normalizedPoints.map((p) => Offset(p.dx - avgX + 0.5, p.dy - avgY + 0.5)).toList();
+
+  return _recognizePattern(normalizedPoints, width / height);
+}
 
   int _recognizePattern(List<Offset> points, double aspectRatio) {
     int strokeCount = _countStrokes();
@@ -84,21 +89,50 @@ class _CalculPageState extends State<CalculPage> with SingleTickerProviderStateM
     bool isVertical = aspectRatio < 0.5;
     bool isCircular = aspectRatio > 0.7 && aspectRatio < 1.3;
 
+    // 0 : boucle unique, aspect ratio ~carré
     if (hasLoop && isCircular && strokeCount == 1) return 0;
+
+    // 1 : trait vertical, peu de points
     if (strokeCount == 1 && isVertical && points.length < 30) return 1;
-    if (_hasZigZag(points) && strokeCount == 1) {
-      if (_hasHorizontalBottom(points)) return 2;
-      if (_countDirectionChanges(points) > 3) return 3;
-    }
-    if (strokeCount == 2 || strokeCount == 3) {
-      if (_hasVerticalLine(points) && _hasHorizontalLine(points)) return 4;
-    }
-    if (_hasHorizontalTop(points) && _hasVerticalLine(points)) return 5;
+
+    // 2 : courbe en haut, ligne droite en bas, pas de boucle, pas de ligne horizontale en haut
+    if (strokeCount == 1 &&
+        _hasTopCurve(points) &&
+        _hasHorizontalBottom(points) &&
+        !_hasBottomLine(points) &&
+        !_hasHorizontalTop(points) &&
+        !_detectLoop(points)) return 2;
+
+    // 3 : zigzag, plusieurs changements de direction, pas de boucle
+    if (_hasZigZag(points) && strokeCount == 1 && _countDirectionChanges(points) > 3 && !_detectLoop(points)) return 3;
+
+    // 4 : deux traits, un vertical et un horizontal, pas de boucle, pas de courbe en haut
+    if ((strokeCount == 2 || strokeCount == 3) &&
+        _hasVerticalLine(points) &&
+        _hasHorizontalLine(points) &&
+        !_detectLoop(points) &&
+        !_hasTopCurve(points)) return 4;
+
+    // 5 : ligne horizontale en haut, courbe en bas, pas de boucle, bottom line présente
+    if (strokeCount == 1 &&
+        _hasHorizontalTop(points) &&
+        _hasBottomLine(points) &&
+        !_detectLoop(points) &&
+        !_hasTopCurve(points)) return 5;
+
+    // 6 : boucle + courbe en haut
     if (hasLoop && _hasTopCurve(points)) return 6;
+
+    // 7 : trait incliné, peu de traits
     if (strokeCount <= 2 && _hasAngledLine(points)) return 7;
+
+    // 8 : deux boucles
     if (hasLoop && _countLoops(points) >= 2) return 8;
+
+    // 9 : boucle + ligne en bas
     if (hasLoop && _hasBottomLine(points)) return 9;
 
+    // fallback heuristics
     if (points.length > 50) return 8;
     if (points.length > 30) return 3;
     if (points.length < 15) return 1;
@@ -224,6 +258,17 @@ class _CalculPageState extends State<CalculPage> with SingleTickerProviderStateM
     });
   }
 
+  List<Offset> _simplify(List<Offset> points, {int target = 32}) {
+    final clean = points.where((p) => p != Offset.zero).toList();
+    if (clean.length <= target) return clean;
+    List<Offset> result = [];
+    double step = clean.length / target;
+    for (int i = 0; i < target; i++) {
+      result.add(clean[(i * step).round()]);
+    }
+    return result;
+  }
+
   @override
   void dispose() {
     _animationController.dispose();
@@ -276,26 +321,46 @@ class _CalculPageState extends State<CalculPage> with SingleTickerProviderStateM
                 borderRadius: BorderRadius.circular(24),
                 boxShadow: [BoxShadow(color: Colors.black12, blurRadius: 10)],
               ),
-              child: Stack(
-                children: [
-                  GestureDetector(
-                    onPanStart: (details) {
-                      if (showFeedback && recognizedDigit == answer) return;
-                      RenderBox box = context.findRenderObject() as RenderBox;
-                      setState(() => points.add(box.globalToLocal(details.localPosition)));
-                    },
-                    onPanUpdate: (details) {
-                      if (showFeedback && recognizedDigit == answer) return;
-                      RenderBox box = context.findRenderObject() as RenderBox;
-                      setState(() => points.add(box.globalToLocal(details.localPosition)));
-                    },
-                    onPanEnd: (_) => setState(() => points.add(Offset.zero)),
-                    child: CustomPaint(
-                      painter: _DrawingPainter(points),
-                      child: Container(),
-                    ),
-                  ),
-                ],
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(24),
+                child: LayoutBuilder(
+                  builder: (context, constraints) {
+                    double maxX = constraints.maxWidth;
+                    double maxY = constraints.maxHeight;
+                    return Stack(
+                      children: [
+                        GestureDetector(
+                          onPanStart: (details) {
+                            if (showFeedback && recognizedDigit == answer) return;
+                            RenderBox box = context.findRenderObject() as RenderBox;
+                            Offset local = box.globalToLocal(details.globalPosition);
+                            // Clamp the point to stay inside the drawing area
+                            local = Offset(
+                              local.dx.clamp(0.0, maxX),
+                              local.dy.clamp(0.0, maxY),
+                            );
+                            setState(() => points.add(local));
+                          },
+                          onPanUpdate: (details) {
+                            if (showFeedback && recognizedDigit == answer) return;
+                            RenderBox box = context.findRenderObject() as RenderBox;
+                            Offset local = box.globalToLocal(details.globalPosition);
+                            local = Offset(
+                              local.dx.clamp(0.0, maxX),
+                              local.dy.clamp(0.0, maxY),
+                            );
+                            setState(() => points.add(local));
+                          },
+                          onPanEnd: (_) => setState(() => points.add(Offset.zero)),
+                          child: CustomPaint(
+                            painter: _DrawingPainter(points),
+                            child: Container(),
+                          ),
+                        ),
+                      ],
+                    );
+                  },
+                ),
               ),
             ),
           ),
